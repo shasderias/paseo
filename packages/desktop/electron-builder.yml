@@ -1,6 +1,9 @@
 npmRebuild: false
 appId: sh.paseo.desktop
 productName: Paseo
+extraMetadata:
+  paseoCustomized: true
+  paseoCustomizationOwner: shasderias
 executableName: Paseo
 protocols:
   - name: Paseo agent link

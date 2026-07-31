@@ -80,7 +80,11 @@ import { BrowserDataSection } from "@/desktop/components/browser-data-section";
 import { IntegrationsSection } from "@/desktop/components/integrations-section";
 import { isElectronRuntime } from "@/desktop/host";
 import { useDesktopAppUpdater } from "@/desktop/updates/use-desktop-app-updater";
-import { formatVersionWithPrefix } from "@/desktop/updates/desktop-updates";
+import {
+  formatVersionWithPrefix,
+  getDesktopRuntimeInfo,
+  type DesktopRuntimeInfo,
+} from "@/desktop/updates/desktop-updates";
 import { resolveAppVersion } from "@/utils/app-version";
 import { useAppDiagnosticStore } from "@/diagnostics/store";
 import { settingsStyles } from "@/styles/settings";
@@ -1138,7 +1142,17 @@ export default function SettingsScreen({ view, openAddHostIntent = null }: Setti
   const lastOpenedAddHostIntentRef = useRef<string | null>(null);
   const isDesktopApp = isElectronRuntime();
   const appVersion = resolveAppVersion();
-  const appVersionText = formatVersionWithPrefix(appVersion);
+  const [desktopRuntimeInfo, setDesktopRuntimeInfo] = useState<DesktopRuntimeInfo | null>(null);
+  const appVersionText = useMemo(() => {
+    const version = formatVersionWithPrefix(appVersion);
+    if (!desktopRuntimeInfo?.customized) {
+      return version;
+    }
+
+    return desktopRuntimeInfo.customizationOwner
+      ? `${version} · customized by ${desktopRuntimeInfo.customizationOwner}`
+      : `${version} · customized`;
+  }, [appVersion, desktopRuntimeInfo]);
   const isCompactLayout = useIsCompactFormFactor();
   const insets = useSafeAreaInsets();
   const insetBottomStyle = useMemo(() => ({ paddingBottom: insets.bottom }), [insets.bottom]);
@@ -1148,6 +1162,28 @@ export default function SettingsScreen({ view, openAddHostIntent = null }: Setti
   const [selectedSettingsHostServerId, setSelectedSettingsHostServerId] = useState<string | null>(
     view.kind === "host" ? view.serverId : null,
   );
+  useEffect(() => {
+    if (!isDesktopApp) {
+      setDesktopRuntimeInfo(null);
+      return;
+    }
+
+    let cancelled = false;
+    void getDesktopRuntimeInfo()
+      .then((runtimeInfo) => {
+        if (!cancelled) {
+          setDesktopRuntimeInfo(runtimeInfo);
+        }
+        return runtimeInfo;
+      })
+      .catch((error) => {
+        console.warn("[Settings] Failed to load desktop customization metadata", error);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isDesktopApp]);
   useEffect(() => {
     if (view.kind === "host") {
       setSelectedSettingsHostServerId(view.serverId);

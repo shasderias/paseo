@@ -45,6 +45,7 @@ import { getDesktopSettingsStore } from "../settings/desktop-settings-electron.j
 import { isRunningUnderARM64Translation } from "../system/arm64-translation.js";
 import { getDesktopAppLogs } from "../diagnostics/app-logs.js";
 import { tailFile } from "../diagnostics/tail-file.js";
+import { getDesktopCustomization } from "../customization.js";
 
 const DAEMON_LOG_FILENAME = "daemon.log";
 const STARTUP_POLL_INTERVAL_MS = 200;
@@ -568,10 +569,15 @@ async function resolveRequestedReleaseChannel(
 export function createDaemonCommandHandlers(): Record<string, DesktopCommandHandler> {
   return {
     ...createDesktopSettingsCommandHandlers({ settingsStore: getDesktopSettingsStore() }),
-    desktop_get_runtime_info: () => ({
-      appVersion: resolveDesktopAppVersion(),
-      runningUnderARM64Translation: isRunningUnderARM64Translation(),
-    }),
+    desktop_get_runtime_info: () => {
+      const customization = getDesktopCustomization();
+      return {
+        appVersion: resolveDesktopAppVersion(),
+        customized: customization.customized,
+        customizationOwner: customization.owner,
+        runningUnderARM64Translation: isRunningUnderARM64Translation(),
+      };
+    },
     desktop_daemon_status: () => resolveDesktopDaemonStatus(),
     start_desktop_daemon: () => startDaemon(),
     stop_desktop_daemon: (args) => stopDesktopDaemon(parseDesktopDaemonStopReason(args)),
