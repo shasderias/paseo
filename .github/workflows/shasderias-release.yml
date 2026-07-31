@@ -1,0 +1,276 @@
+name: Shasderias Release
+
+on:
+  push:
+    tags:
+      - "v*-shasderias-*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing shasderias release tag to rebuild"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: shasderias-release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  SOURCE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    outputs:
+      source_tag: ${{ steps.release.outputs.source_tag }}
+      version: ${{ steps.release.outputs.version }}
+      release_version: ${{ steps.release.outputs.release_version }}
+      source_sha: ${{ steps.release.outputs.source_sha }}
+      short_sha: ${{ steps.release.outputs.short_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ env.SOURCE_TAG }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.20.0"
+
+      - name: Validate fork release
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$SOURCE_TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)-shasderias-([1-9][0-9]*)$ ]]; then
+            version="${BASH_REMATCH[1]}"
+          elif [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" && "$SOURCE_TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)-shasderias$ ]]; then
+            # Compatibility for the one release created before numbered serials.
+            version="${BASH_REMATCH[1]}"
+          else
+            echo "::error::Unsupported release tag: $SOURCE_TAG"
+            exit 1
+          fi
+
+          release_version="${SOURCE_TAG#v}"
+          package_version=$(node -p "require('./package.json').version")
+          desktop_version=$(node -p "require('./packages/desktop/package.json').version")
+          if [[ "$package_version" != "$version" || "$desktop_version" != "$version" ]]; then
+            echo "::error::Tag version $version does not match root ($package_version) and desktop ($desktop_version) package versions"
+            exit 1
+          fi
+          VERSION="$version" node <<'NODE'
+          const fs = require("node:fs");
+          const root = JSON.parse(fs.readFileSync("package.json", "utf8"));
+          for (const workspace of root.workspaces) {
+            const packagePath = `${workspace}/package.json`;
+            const pkg = JSON.parse(fs.readFileSync(packagePath, "utf8"));
+            if (pkg.version !== process.env.VERSION) {
+              throw new Error(`${packagePath} has version ${pkg.version}, expected ${process.env.VERSION}`);
+            }
+          }
+          NODE
+
+          git fetch origin +main:refs/remotes/origin/main
+          source_sha=$(git rev-list -n 1 "$SOURCE_TAG")
+          if [[ "$GITHUB_EVENT_NAME" == "push" ]] && ! git merge-base --is-ancestor "$source_sha" refs/remotes/origin/main; then
+            echo "::error::New release tag $SOURCE_TAG is not on origin/main"
+            exit 1
+          fi
+
+          ./scripts/check-shasderias-workflows.sh
+
+          echo "source_tag=$SOURCE_TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "release_version=$release_version" >> "$GITHUB_OUTPUT"
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${source_sha:0:12}" >> "$GITHUB_OUTPUT"
+
+  linux:
+    needs: validate
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.validate.outputs.source_tag }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.20.0"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: node scripts/npm-retry.mjs ci
+
+      - name: Install packaged-app smoke dependencies
+        run: sudo apt-get update && sudo apt-get install -y xvfb xauth
+
+      - name: Build Linux tarball
+        env:
+          EP_GH_IGNORE_TIME: true
+          PASEO_DESKTOP_SMOKE: "1"
+          PASEO_DESKTOP_SMOKE_ARTIFACT_DIR: ${{ runner.temp }}/desktop-smoke
+        run: npm run build:desktop -- --publish never --linux tar.gz --x64
+
+      - name: Collect Linux archive
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.release_version }}
+          SHORT_SHA: ${{ needs.validate.outputs.short_sha }}
+        run: |
+          set -euo pipefail
+          archive=$(find packages/desktop/release -maxdepth 1 -type f -name '*.tar.gz' -print -quit)
+          [[ -n "$archive" ]] || {
+            echo "::error::Linux tar.gz artifact was not produced"
+            exit 1
+          }
+          tar -tzf "$archive" >/dev/null
+          mkdir -p fork-artifacts
+          cp "$archive" "fork-artifacts/Paseo-${RELEASE_VERSION}-${SHORT_SHA}-linux-x64.tar.gz"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shasderias-linux-x64
+          path: fork-artifacts/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload smoke diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shasderias-linux-smoke
+          path: ${{ runner.temp }}/desktop-smoke
+          if-no-files-found: ignore
+          retention-days: 7
+
+  windows:
+    needs: validate
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.validate.outputs.source_tag }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.20.0"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: node scripts/npm-retry.mjs ci
+
+      - name: Build Windows ZIPs
+        shell: bash
+        env:
+          EP_GH_IGNORE_TIME: true
+          PASEO_DESKTOP_SMOKE: "1"
+          PASEO_DESKTOP_SMOKE_ARTIFACT_DIR: ${{ runner.temp }}/desktop-smoke
+        run: npm run build:desktop -- --publish never --win zip --x64 --arm64
+
+      - name: Collect Windows archives
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.release_version }}
+          SHORT_SHA: ${{ needs.validate.outputs.short_sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p fork-artifacts
+          for arch in x64 arm64; do
+            archive=$(find packages/desktop/release -maxdepth 1 -type f -name "*-${arch}.zip" -print -quit)
+            [[ -n "$archive" ]] || {
+              echo "::error::Windows $arch ZIP artifact was not produced"
+              exit 1
+            }
+            7z t "$archive" >/dev/null
+            cp "$archive" "fork-artifacts/Paseo-${RELEASE_VERSION}-${SHORT_SHA}-windows-${arch}.zip"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shasderias-windows
+          path: fork-artifacts/*.zip
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload smoke diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shasderias-windows-smoke
+          path: ${{ runner.temp }}/desktop-smoke
+          if-no-files-found: ignore
+          retention-days: 7
+
+  publish:
+    needs: [validate, linux, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: shasderias-*
+          path: fork-artifacts
+          merge-multiple: true
+
+      - name: Generate checksums
+        working-directory: fork-artifacts
+        run: sha256sum *.tar.gz *.zip > SHA256SUMS
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_TAG: ${{ needs.validate.outputs.source_tag }}
+          SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_archives=3
+          actual_archives=$(find fork-artifacts -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' \) | wc -l | tr -d ' ')
+          [[ "$actual_archives" == "$expected_archives" ]] || {
+            echo "::error::Expected $expected_archives archives, found $actual_archives"
+            find fork-artifacts -maxdepth 1 -type f -print
+            exit 1
+          }
+
+          release_title="Paseo ${SOURCE_TAG}"
+          release_notes=$(printf 'Version: %s\nCommit: %s\n' "$SOURCE_TAG" "$SOURCE_SHA")
+
+          if gh release view "$SOURCE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$SOURCE_TAG" \
+              --draft \
+              --title "$release_title" \
+              --notes "$release_notes" \
+              --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$SOURCE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --draft \
+              --title "$release_title" \
+              --notes "$release_notes"
+          fi
+
+          while IFS= read -r asset; do
+            [[ -n "$asset" ]] || continue
+            gh release delete-asset "$SOURCE_TAG" "$asset" --yes --repo "$GITHUB_REPOSITORY"
+          done < <(
+            gh release view "$SOURCE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name'
+          )
+
+          gh release upload "$SOURCE_TAG" fork-artifacts/* \
+            --clobber \
+            --repo "$GITHUB_REPOSITORY"
+          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+            gh release edit "$SOURCE_TAG" --draft=false --latest --repo "$GITHUB_REPOSITORY"
+          else
+            gh release edit "$SOURCE_TAG" --draft=false --repo "$GITHUB_REPOSITORY"
+          fi
