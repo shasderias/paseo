@@ -4,6 +4,7 @@ import path from "node:path";
 import { app } from "electron";
 import { UUID } from "builder-util-runtime";
 import { autoUpdater } from "electron-updater";
+import { getDesktopCustomization } from "../customization.js";
 import {
   createAppUpdateService,
   type AppUpdateCheckResult,
@@ -43,6 +44,9 @@ function isUpdateChannelNotPublished(error: unknown): boolean {
     error.code === UPDATE_CHANNEL_NOT_PUBLISHED_CODE
   );
 }
+
+const CUSTOMIZED_UPDATE_MESSAGE =
+  "Automatic updates are disabled for customized builds. Install updates from the shasderias fork release.";
 
 export function shouldAdmitToRollout(args: {
   channel: AppReleaseChannel;
@@ -200,6 +204,18 @@ export async function checkForAppUpdate({
   releaseChannel: AppReleaseChannel;
   intent: AppUpdateCheckIntent;
 }): Promise<AppUpdateCheckResult> {
+  if (getDesktopCustomization().customized) {
+    return {
+      hasUpdate: false,
+      readyToInstall: false,
+      currentVersion,
+      latestVersion: currentVersion,
+      body: null,
+      date: null,
+      errorMessage: intent === "manual" ? CUSTOMIZED_UPDATE_MESSAGE : null,
+    };
+  }
+
   return appUpdateService.checkForAppUpdate({ currentVersion, releaseChannel, intent });
 }
 
@@ -213,6 +229,14 @@ export async function downloadAndInstallUpdate(
   },
   onBeforeQuit?: () => Promise<void>,
 ): Promise<AppUpdateInstallResult> {
+  if (getDesktopCustomization().customized) {
+    return {
+      installed: false,
+      version: currentVersion,
+      message: CUSTOMIZED_UPDATE_MESSAGE,
+    };
+  }
+
   return appUpdateService.downloadAndInstallUpdate(
     { currentVersion, releaseChannel },
     onBeforeQuit,
@@ -228,6 +252,10 @@ export async function installAppUpdateOnQuit({
   releaseChannel: AppReleaseChannel;
   signal: AbortSignal;
 }): Promise<boolean> {
+  if (getDesktopCustomization().customized) {
+    return false;
+  }
+
   if (
     !shouldInstallAppUpdateOnQuit({
       platform: process.platform,

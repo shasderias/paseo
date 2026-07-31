@@ -99,14 +99,20 @@ describe("desktop-updates helpers", () => {
     expect(
       parseDesktopRuntimeInfo({
         appVersion: " 0.1.64 ",
+        customized: true,
+        customizationOwner: " shasderias ",
         runningUnderARM64Translation: true,
       }),
     ).toEqual({
       appVersion: "0.1.64",
+      customized: true,
+      customizationOwner: "shasderias",
       runningUnderARM64Translation: true,
     });
     expect(parseDesktopRuntimeInfo(null)).toEqual({
       appVersion: null,
+      customized: false,
+      customizationOwner: null,
       runningUnderARM64Translation: false,
     });
   });

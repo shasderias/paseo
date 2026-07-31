@@ -21,6 +21,8 @@ export interface DesktopAppUpdateInstallResult {
 
 export interface DesktopRuntimeInfo {
   appVersion: string | null;
+  customized: boolean;
+  customizationOwner: string | null;
   runningUnderARM64Translation: boolean;
 }
 
@@ -85,12 +87,16 @@ export function parseDesktopRuntimeInfo(raw: unknown): DesktopRuntimeInfo {
   if (!isRecord(raw)) {
     return {
       appVersion: null,
+      customized: false,
+      customizationOwner: null,
       runningUnderARM64Translation: false,
     };
   }
 
   return {
     appVersion: toStringOrNull(raw.appVersion),
+    customized: raw.customized === true,
+    customizationOwner: toStringOrNull(raw.customizationOwner),
     runningUnderARM64Translation: raw.runningUnderARM64Translation === true,
   };
 }
