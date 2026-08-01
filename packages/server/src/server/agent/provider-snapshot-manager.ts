@@ -147,16 +147,22 @@ export interface ProviderDiagnosticResult {
   diagnostic: string;
 }
 
+/**
+ * Internal provider launch definition handed to AgentManager. Mirrors the
+ * resolved registry entry: enabled state plus optional resolved launch hook.
+ */
+export type ProviderLaunchDefinition = Pick<
+  ProviderDefinition,
+  | "enabled"
+  | "derivedFromProviderId"
+  | "validateOptions"
+  | "applyOptions"
+  | "applyToolPolicy"
+  | "launchHook"
+>;
+
 export interface AgentManagerProviderState {
-  providerDefinitions: Partial<
-    Record<
-      AgentProvider,
-      Pick<
-        ProviderDefinition,
-        "enabled" | "derivedFromProviderId" | "validateOptions" | "applyOptions" | "applyToolPolicy"
-      >
-    >
-  >;
+  providerDefinitions: Partial<Record<AgentProvider, ProviderLaunchDefinition>>;
   clients: Partial<Record<AgentProvider, AgentClient>>;
 }
 
@@ -282,6 +288,7 @@ export class ProviderSnapshotManager {
         validateOptions: definition.validateOptions,
         applyOptions: definition.applyOptions,
         applyToolPolicy: definition.applyToolPolicy,
+        ...(definition.launchHook ? { launchHook: definition.launchHook } : {}),
       };
       if (definition.enabled) {
         clients[provider] = this.ensureClient(provider, definition);

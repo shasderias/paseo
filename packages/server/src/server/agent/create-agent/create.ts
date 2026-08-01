@@ -46,6 +46,16 @@ export interface CreateAgentCommandDependencies {
   createPaseoWorktree?: CreatePaseoWorktreeWorkflowFn;
   // Mints a fresh directory workspace for a cwd and returns its id.
   ensureWorkspaceForCreate?: EnsureWorkspaceForCreate;
+  /**
+   * Cleans up a worktree created by this request when agent registration
+   * fails (including provider launch hook rejection). Must never remove a
+   * reused worktree or a directory workspace unless provisioning proved
+   * ownership. Cleanup failures are logged without replacing the original
+   * error.
+   */
+  cleanupCreatedWorktreeForFailedCreate?: (
+    createdWorktree: CreatePaseoWorktreeWorkflowResult,
+  ) => Promise<void>;
 }
 
 export type EnsureWorkspaceForCreate = (
@@ -179,11 +189,32 @@ export async function createAgentCommand(
       ? await resolveSessionCreateAgent(dependencies, input)
       : await resolveMcpCreateAgent(dependencies, input);
 
-  const snapshot = await dependencies.agentManager.createAgent(
-    resolved.config,
-    undefined,
-    resolved.createOptions,
-  );
+  let snapshot: ManagedAgent;
+  try {
+    snapshot = await dependencies.agentManager.createAgent(
+      resolved.config,
+      undefined,
+      resolved.createOptions,
+    );
+  } catch (error) {
+    // Pre-registration failure (e.g. provider launch hook rejection): a
+    // worktree created by this request is orphaned unless cleaned up here.
+    // Once the agent is registered it owns the worktree, so nothing runs.
+    if (resolved.createdWorktree && dependencies.cleanupCreatedWorktreeForFailedCreate) {
+      try {
+        await dependencies.cleanupCreatedWorktreeForFailedCreate(resolved.createdWorktree);
+      } catch (cleanupError) {
+        dependencies.logger.warn(
+          {
+            err: cleanupError,
+            worktreePath: resolved.createdWorktree.worktree.worktreePath,
+          },
+          "Failed to clean up request-created worktree after agent create failed",
+        );
+      }
+    }
+    throw error;
+  }
 
   resolved.setupContinuation?.startAfterAgentCreate({
     agentId: snapshot.id,

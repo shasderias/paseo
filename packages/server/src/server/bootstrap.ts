@@ -137,6 +137,7 @@ import {
 } from "./agent/tools/paseo-tools.js";
 import type { PaseoToolRuntimeContext } from "./agent/tools/types.js";
 import { ProviderSnapshotManager } from "./agent/provider-snapshot-manager.js";
+import { runProviderLaunchHook } from "./agent/launch-hook.js";
 import { bootstrapWorkspaceRegistries } from "./workspace-registry-bootstrap.js";
 import { WorkspaceReconciliationService } from "./workspace-reconciliation-service.js";
 import {
@@ -829,9 +830,16 @@ export async function createPaseoDaemon(
     extraClients: config.agentClients,
   });
   const initialAgentManagerState = providerSnapshotManager.getAgentManagerProviderState();
+  const launchHookLogger = logger.child({ module: "launch-hook" });
   const agentManager = new AgentManager({
     clients: initialAgentManagerState.clients,
     providerDefinitions: initialAgentManagerState.providerDefinitions,
+    launchHookRunner: (input) =>
+      runProviderLaunchHook({
+        ...input,
+        paseoHome: config.paseoHome,
+        logger: launchHookLogger,
+      }),
     registry: agentStorage,
     appendSystemPrompt: config.appendSystemPrompt,
     onWorkspaceStateMayHaveChanged: ({ cwd }) => {
@@ -1059,19 +1067,6 @@ export async function createPaseoDaemon(
     );
   };
 
-  const createAgentCommandDependencies: CreateAgentCommandDependencies = {
-    agentManager,
-    agentStorage,
-    logger,
-    paseoHome: config.paseoHome,
-    worktreesRoot: config.worktreesRoot,
-    terminalManager,
-    providerSnapshotManager,
-    createPaseoWorktree: createPaseoWorktreeForTools,
-    ensureWorkspaceForCreate: ensureWorkspaceForCreateAndBroadcastExternal,
-  };
-  const createAgent = (input: Parameters<typeof createAgentCommand>[1]) =>
-    createAgentCommand(createAgentCommandDependencies, input);
   const archiveWorkspaceByIdExternal = (workspaceId: string, requestId: string) =>
     archiveByScope(
       {
@@ -1117,6 +1112,23 @@ export async function createPaseoDaemon(
       killTerminalsForWorkspace({ terminalManager, sessionLogger: logger }, workspaceId),
     logger,
   });
+  // Deliberately no cleanupCreatedWorktreeForFailedCreate here: hub executions
+  // share this bound command and already run their own failed-create cleanup
+  // (daemon-executions), so a second shared cleanup would double-archive the
+  // worktree. The MCP create_agent tool host opts in explicitly below.
+  const createAgentCommandDependencies: CreateAgentCommandDependencies = {
+    agentManager,
+    agentStorage,
+    logger,
+    paseoHome: config.paseoHome,
+    worktreesRoot: config.worktreesRoot,
+    terminalManager,
+    providerSnapshotManager,
+    createPaseoWorktree: createPaseoWorktreeForTools,
+    ensureWorkspaceForCreate: ensureWorkspaceForCreateAndBroadcastExternal,
+  };
+  const createAgent = (input: Parameters<typeof createAgentCommand>[1]) =>
+    createAgentCommand(createAgentCommandDependencies, input);
   const hubRelationships = new HubRelationshipController({
     paseoHome: config.paseoHome,
     serverId,
@@ -1290,6 +1302,11 @@ export async function createPaseoDaemon(
     clearWorkspaceArchiving: clearWorkspaceArchivingExternal,
     ensureWorkspaceForCreate: createAgentCommandDependencies.ensureWorkspaceForCreate,
     createPaseoWorktree: createAgentCommandDependencies.createPaseoWorktree,
+    cleanupCreatedWorktreeForFailedCreate: (createdWorktree) =>
+      hubAgentLifecycle.cleanupCreatedWorktreeAfterFailedAgentCreate({
+        createdWorktree,
+        createdAgentId: null,
+      }),
     browserToolsEnabled: browserToolsPolicy.isEnabled(),
     browserToolsBroker,
     paseoHome: config.paseoHome,

@@ -1,4 +1,4 @@
-import { expect, test, vi } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import { spawn } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -40,6 +40,7 @@ import type {
 } from "./agent-sdk-types.js";
 import type { PaseoToolCatalog } from "./tools/types.js";
 import type { ProviderDefinition } from "./provider-registry.js";
+import { ProviderLaunchHookError } from "./launch-hook.js";
 
 interface Deferred<T> {
   promise: Promise<T>;
@@ -1799,6 +1800,7 @@ test("createAgent passes daemon launch env through the provider launch context",
     agentId: snapshot.id,
     env: {
       PASEO_AGENT_ID: snapshot.id,
+      PASEO_PROVIDER: "codex",
       PASEO_AGENT_CWD: workdir,
     },
   });
@@ -2766,6 +2768,7 @@ test("resumeAgentFromPersistence keeps metadata config, applies overrides, and p
     agentId: resumed.id,
     env: {
       PASEO_AGENT_ID: resumed.id,
+      PASEO_PROVIDER: "codex",
       PASEO_AGENT_CWD: workdir,
     },
   });
@@ -2874,6 +2877,7 @@ test("importProviderSession imports the selected session without listing and pub
     agentId: imported.id,
     env: {
       PASEO_AGENT_ID: imported.id,
+      PASEO_PROVIDER: "codex",
       PASEO_AGENT_CWD: workdir,
     },
   });
@@ -2977,6 +2981,7 @@ test("reloadAgentSession passes daemon launch env through the provider launch co
     agentId: snapshot.id,
     env: {
       PASEO_AGENT_ID: snapshot.id,
+      PASEO_PROVIDER: "codex",
       PASEO_AGENT_CWD: workdir,
     },
   });
@@ -2989,6 +2994,7 @@ test("reloadAgentSession passes daemon launch env through the provider launch co
     agentId: snapshot.id,
     env: {
       PASEO_AGENT_ID: snapshot.id,
+      PASEO_PROVIDER: "codex",
       PASEO_AGENT_CWD: workdir,
     },
   });
@@ -9132,4 +9138,445 @@ test("onWorkspaceStateMayHaveChanged is not called for running shell tool calls"
   await manager.runAgent(snapshot.id, { text: "merge it" });
 
   expect(onWorkspaceStateMayHaveChanged).not.toHaveBeenCalled();
+});
+
+describe("provider launch hook integration", () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-launch-hook-"));
+  const storagePath = join(workdir, "agents");
+
+  class HookCaptureClient extends TestAgentClient {
+    lastLaunchContext: AgentLaunchContext | undefined;
+    createCalls = 0;
+    resumeCalls = 0;
+    importCalls = 0;
+
+    override async createSession(
+      config: AgentSessionConfig,
+      launchContext?: AgentLaunchContext,
+    ): Promise<AgentSession> {
+      this.createCalls += 1;
+      this.lastLaunchContext = launchContext;
+      return new TestAgentSession(config);
+    }
+
+    override async resumeSession(
+      handle: AgentPersistenceHandle,
+      config?: Partial<AgentSessionConfig>,
+      launchContext?: AgentLaunchContext,
+    ): Promise<AgentSession> {
+      this.resumeCalls += 1;
+      this.lastLaunchContext = launchContext;
+      return new TestAgentSession({
+        provider: this.provider,
+        cwd: config?.cwd ?? process.cwd(),
+      });
+    }
+
+    async importSession(input: ImportProviderSessionInput, context: ImportProviderSessionContext) {
+      this.importCalls += 1;
+      this.lastLaunchContext = context.launchContext;
+      return {
+        session: new TestAgentSession({ provider: this.provider, cwd: input.cwd }),
+        config: { provider: this.provider, cwd: input.cwd },
+        persistence: {
+          provider: this.provider as const,
+          sessionId: input.providerHandleId,
+          metadata: { provider: this.provider, cwd: input.cwd },
+        },
+        timeline: [],
+      };
+    }
+  }
+
+  function createManager(options: {
+    client: HookCaptureClient;
+    runner?: ReturnType<typeof vi.fn>;
+    hook?: { command: string; providerEnv?: Record<string, string> };
+  }): AgentManager {
+    return new AgentManager({
+      clients: { codex: options.client },
+      providerDefinitions: options.hook
+        ? {
+            codex: {
+              enabled: true,
+              derivedFromProviderId: null,
+              launchHook: {
+                command: options.hook.command,
+                providerEnv: options.hook.providerEnv ?? {},
+              },
+            },
+          }
+        : { codex: { enabled: true, derivedFromProviderId: null } },
+      ...(options.runner ? { launchHookRunner: options.runner } : {}),
+      registry: new AgentStorage(storagePath, logger),
+      logger,
+      idFactory: () => "00000000-0000-4000-8000-000000000200",
+    });
+  }
+
+  function expectBaseEnv(env: Record<string, string> | undefined, agentId: string): void {
+    expect(env).toEqual({
+      PASEO_AGENT_ID: agentId,
+      PASEO_PROVIDER: "codex",
+      PASEO_AGENT_CWD: workdir,
+    });
+  }
+
+  test("no hook configured means no invocation and unchanged launch context", async () => {
+    const client = new HookCaptureClient();
+    const runner = vi.fn(async () => ({}));
+    const manager = createManager({ client, runner });
+
+    const snapshot = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+
+    expect(runner).not.toHaveBeenCalled();
+    expectBaseEnv(client.lastLaunchContext?.env, snapshot.id);
+  });
+
+  test("hook configured without a runner skips invocation (test managers need no subprocess)", async () => {
+    const client = new HookCaptureClient();
+    const manager = createManager({
+      client,
+      hook: { command: "hook-cmd" },
+    });
+
+    const snapshot = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+
+    expectBaseEnv(client.lastLaunchContext?.env, snapshot.id);
+  });
+
+  test("create populates all stdin fields from initial create input", async () => {
+    const client = new HookCaptureClient();
+    const runner = vi.fn(async () => ({}));
+    const manager = createManager({ client, runner, hook: { command: "hook-cmd" } });
+
+    const snapshot = await manager.createAgent(
+      { provider: "codex", cwd: workdir, model: "gpt-5.4", modeId: "auto-review" },
+      undefined,
+      {
+        labels: { tenant: "acme" },
+        workspaceId: "ws_1",
+      },
+    );
+
+    expect(runner).toHaveBeenCalledTimes(1);
+    expect(runner.mock.calls[0]?.[0]).toEqual({
+      command: "hook-cmd",
+      providerEnv: {},
+      context: {
+        agentId: snapshot.id,
+        provider: "codex",
+        cwd: workdir,
+        workspaceId: "ws_1",
+        labels: { tenant: "acme" },
+        model: "gpt-5.4",
+        modeId: "auto-review",
+      },
+    });
+  });
+
+  test("hook env overrides the configured provider env", async () => {
+    const client = new HookCaptureClient();
+    const runner = vi.fn(async () => ({ SHARED: "from-hook", HOOK_ONLY: "h" }));
+    const manager = createManager({
+      client,
+      runner,
+      hook: { command: "hook-cmd", providerEnv: { SHARED: "from-provider", PROVIDER_ONLY: "p" } },
+    });
+
+    const snapshot = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+
+    expect(runner.mock.calls[0]?.[0]?.providerEnv).toEqual({
+      SHARED: "from-provider",
+      PROVIDER_ONLY: "p",
+    });
+    // The provider env itself is applied by the provider adapter; the launch
+    // context env carries hook output, one-shot env, and Paseo-owned variables.
+    expect(client.lastLaunchContext?.env).toEqual({
+      SHARED: "from-hook",
+      HOOK_ONLY: "h",
+      PASEO_AGENT_ID: snapshot.id,
+      PASEO_PROVIDER: "codex",
+      PASEO_AGENT_CWD: workdir,
+    });
+  });
+
+  test("one-shot env overrides hook env on initial create only", async () => {
+    const client = new HookCaptureClient();
+    const runner = vi.fn(async () => ({ SHARED: "from-hook", HOOK_ONLY: "h" }));
+    const manager = createManager({ client, runner, hook: { command: "hook-cmd" } });
+
+    const snapshot = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+      env: { SHARED: "from-oneshot", ONE_SHOT_ONLY: "o" },
+    });
+
+    expect(client.lastLaunchContext?.env).toEqual({
+      SHARED: "from-oneshot",
+      HOOK_ONLY: "h",
+      ONE_SHOT_ONLY: "o",
+      PASEO_AGENT_ID: snapshot.id,
+      PASEO_PROVIDER: "codex",
+      PASEO_AGENT_CWD: workdir,
+    });
+
+    // A later resume has no one-shot env, so the hook env applies directly.
+    const handle: AgentPersistenceHandle = {
+      provider: "codex",
+      sessionId: "resume-1",
+      metadata: { provider: "codex", cwd: workdir },
+    };
+    const resumed = await manager.resumeAgentFromPersistence(
+      handle,
+      { cwd: workdir },
+      "00000000-0000-4000-8000-000000000201",
+    );
+
+    expect(resumed.lifecycle).toBe("idle");
+    expect(client.lastLaunchContext?.env).toEqual({
+      SHARED: "from-hook",
+      HOOK_ONLY: "h",
+      PASEO_AGENT_ID: resumed.id,
+      PASEO_PROVIDER: "codex",
+      PASEO_AGENT_CWD: workdir,
+    });
+  });
+
+  test("Paseo-owned variables override configured, hook, and one-shot attempts", async () => {
+    const client = new HookCaptureClient();
+    const runner = vi.fn(async () => ({
+      PASEO_AGENT_ID: "evil",
+      PASEO_PROVIDER: "evil",
+      PASEO_AGENT_CWD: "evil",
+    }));
+    const manager = createManager({
+      client,
+      runner,
+      hook: { command: "hook-cmd", providerEnv: { PASEO_AGENT_CWD: "provider-evil" } },
+    });
+
+    const snapshot = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+      env: { PASEO_AGENT_ID: "oneshot-evil" },
+    });
+
+    expect(client.lastLaunchContext?.env).toEqual({
+      PASEO_AGENT_ID: snapshot.id,
+      PASEO_PROVIDER: "codex",
+      PASEO_AGENT_CWD: workdir,
+    });
+  });
+
+  test("persisted resume uses durable labels and runs the hook again", async () => {
+    const client = new HookCaptureClient();
+    const runner = vi.fn(async () => ({}));
+    const manager = createManager({ client, runner, hook: { command: "hook-cmd" } });
+
+    await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      labels: { tenant: "v1" },
+      workspaceId: "ws_1",
+    });
+
+    const handle: AgentPersistenceHandle = {
+      provider: "codex",
+      sessionId: "resume-2",
+      metadata: { provider: "codex", cwd: workdir },
+    };
+    await manager.resumeAgentFromPersistence(
+      handle,
+      { cwd: workdir },
+      "00000000-0000-4000-8000-000000000201",
+      {
+        labels: { tenant: "v2" },
+        workspaceId: "ws_1",
+      },
+    );
+
+    expect(runner).toHaveBeenCalledTimes(2);
+    expect(runner.mock.calls[1]?.[0]?.context.labels).toEqual({ tenant: "v2" });
+    expect(runner.mock.calls[1]?.[0]?.context.workspaceId).toBe("ws_1");
+  });
+
+  test("archived history load uses the identical hook contract", async () => {
+    const client = new HookCaptureClient();
+    const runner = vi.fn(async () => ({}));
+    const manager = createManager({ client, runner, hook: { command: "hook-cmd" } });
+
+    const handle: AgentPersistenceHandle = {
+      provider: "codex",
+      sessionId: "history-1",
+      metadata: { provider: "codex", cwd: workdir },
+    };
+    const resumed = await manager.resumeAgentFromPersistence(
+      handle,
+      { cwd: workdir },
+      undefined,
+      { labels: { tenant: "archived" }, workspaceId: "ws_9" },
+      { purpose: "history" },
+    );
+
+    expect(resumed.lifecycle).toBe("idle");
+    expect(runner).toHaveBeenCalledTimes(1);
+    expect(runner.mock.calls[0]?.[0]?.context).toMatchObject({
+      agentId: resumed.id,
+      provider: "codex",
+      cwd: workdir,
+      workspaceId: "ws_9",
+      labels: { tenant: "archived" },
+    });
+  });
+
+  test("reload uses current labels and runs the hook again", async () => {
+    const client = new HookCaptureClient();
+    const runner = vi.fn(async () => ({}));
+    const manager = createManager({ client, runner, hook: { command: "hook-cmd" } });
+
+    const snapshot = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      labels: { tenant: "v1" },
+      workspaceId: "ws_1",
+    });
+
+    const reloaded = await manager.reloadAgentSession(snapshot.id, {
+      systemPrompt: "updated",
+    });
+
+    expect(reloaded.id).toBe(snapshot.id);
+    expect(runner).toHaveBeenCalledTimes(2);
+    expect(runner.mock.calls[1]?.[0]?.context).toMatchObject({
+      agentId: snapshot.id,
+      labels: { tenant: "v1" },
+      workspaceId: "ws_1",
+    });
+  });
+
+  test("import uses requested labels and runs the hook", async () => {
+    const client = new HookCaptureClient();
+    const runner = vi.fn(async () => ({}));
+    const manager = createManager({ client, runner, hook: { command: "hook-cmd" } });
+
+    const imported = await manager.importProviderSession({
+      provider: "codex",
+      providerHandleId: "import-1",
+      cwd: workdir,
+      workspaceId: "ws_import",
+      labels: { tenant: "imported" },
+    });
+
+    expect(imported.lifecycle).toBe("idle");
+    expect(runner).toHaveBeenCalledTimes(1);
+    expect(runner.mock.calls[0]?.[0]?.context).toMatchObject({
+      provider: "codex",
+      cwd: workdir,
+      workspaceId: "ws_import",
+      labels: { tenant: "imported" },
+    });
+  });
+
+  test("internal agents never invoke the hook", async () => {
+    const client = new HookCaptureClient();
+    const runner = vi.fn(async () => ({}));
+    const manager = createManager({ client, runner, hook: { command: "hook-cmd" } });
+
+    const snapshot = await manager.createAgent(
+      { provider: "codex", cwd: workdir, title: "Internal", internal: true },
+      undefined,
+      { workspaceId: undefined },
+    );
+
+    expect(runner).not.toHaveBeenCalled();
+    expect(client.createCalls).toBe(1);
+    expect(snapshot.internal).toBe(true);
+  });
+
+  test("hook failure leaves the provider client uncalled and no registered agent", async () => {
+    const client = new HookCaptureClient();
+    const hookError = new ProviderLaunchHookError({
+      kind: "exit",
+      message: "Provider launch hook exited with code 3:\nmissing label tenant",
+      stdout: "missing label tenant",
+    });
+    const runner = vi.fn(async () => {
+      throw hookError;
+    });
+    const manager = createManager({ client, runner, hook: { command: "hook-cmd" } });
+
+    await expect(
+      manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+        workspaceId: undefined,
+      }),
+    ).rejects.toBe(hookError);
+
+    expect(client.createCalls).toBe(0);
+    expect(client.resumeCalls).toBe(0);
+    expect(manager.getAgent("00000000-0000-4000-8000-000000000200")).toBeNull();
+    expect(await manager.listAgents()).toHaveLength(0);
+  });
+
+  test("provider-registry update changes the hook used by the next launch", async () => {
+    const client = new HookCaptureClient();
+    const runner = vi.fn(async () => ({}));
+    const manager = createManager({ client, runner, hook: { command: "hook-v1" } });
+
+    const first = await manager.createAgent(
+      { provider: "codex", cwd: workdir },
+      "00000000-0000-4000-8000-000000000300",
+      { workspaceId: undefined },
+    );
+    expect(runner.mock.calls[0]?.[0]?.command).toBe("hook-v1");
+
+    manager.updateProviderRegistry({
+      providerDefinitions: {
+        codex: {
+          enabled: true,
+          derivedFromProviderId: null,
+          launchHook: { command: "hook-v2", providerEnv: {} },
+        },
+      },
+      clients: { codex: client },
+    });
+
+    const second = await manager.createAgent(
+      { provider: "codex", cwd: workdir },
+      "00000000-0000-4000-8000-000000000301",
+      { workspaceId: undefined },
+    );
+    expect(second.id).not.toBe(first.id);
+    expect(runner.mock.calls[1]?.[0]?.command).toBe("hook-v2");
+
+    // The live first agent is untouched by the config change.
+    expect(manager.getAgent(first.id)?.lifecycle).toBe("idle");
+  });
+
+  test("removing a provider also removes its hook for new launches", async () => {
+    const client = new HookCaptureClient();
+    const runner = vi.fn(async () => ({}));
+    const manager = createManager({ client, runner, hook: { command: "hook-v1" } });
+
+    await manager.createAgent(
+      { provider: "codex", cwd: workdir },
+      "00000000-0000-4000-8000-000000000400",
+      { workspaceId: undefined },
+    );
+    expect(runner).toHaveBeenCalledTimes(1);
+
+    manager.updateProviderRegistry({
+      providerDefinitions: {
+        codex: { enabled: true, derivedFromProviderId: null },
+      },
+      clients: { codex: client },
+    });
+
+    await manager.createAgent(
+      { provider: "codex", cwd: workdir },
+      "00000000-0000-4000-8000-000000000401",
+      { workspaceId: undefined },
+    );
+    expect(runner).toHaveBeenCalledTimes(1);
+  });
 });

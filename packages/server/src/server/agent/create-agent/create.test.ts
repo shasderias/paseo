@@ -10,6 +10,7 @@ import { AgentManager } from "../agent-manager.js";
 import { AgentStorage } from "../agent-storage.js";
 import type { CreatePaseoWorktreeWorkflowResult } from "../../worktree-session.js";
 import { createAgentCommand } from "./create.js";
+import { ProviderLaunchHookError } from "../launch-hook.js";
 import type { ManagedAgent } from "../agent-manager.js";
 
 const logger = createTestLogger();
@@ -469,5 +470,141 @@ test("session create keeps an explicit title after the initial prompt settles", 
     expect(settled?.title).toBe(title);
   } finally {
     await removeRealAgentManagerWorkdir({ agentManager, storage, workdir });
+  }
+});
+
+test("mcp create cleans up a request-created worktree when the launch hook rejects", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "create-agent-hook-reject-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const createdWorktree = await fakeWorktreeCreator({
+    repoRoot: workdir,
+    createdWorkspaceId: "ws-hook-reject",
+  })();
+  const hookError = new ProviderLaunchHookError({
+    kind: "exit",
+    message: "Provider launch hook exited with code 3:\nmissing label tenant",
+    stdout: "missing label tenant",
+  });
+  const createAgent = vi.fn(async () => {
+    throw hookError;
+  });
+  const cleanup = vi.fn(async () => undefined);
+  const dependencies: Parameters<typeof createAgentCommand>[0] = {
+    agentManager: {
+      createAgent,
+      getAgent: vi.fn(() => null),
+    } as unknown as Parameters<typeof createAgentCommand>[0]["agentManager"],
+    agentStorage: storage,
+    logger: createTestLogger(),
+    providerSnapshotManager: {
+      resolveCreateConfig: vi.fn(async () => ({})),
+    } as Parameters<typeof createAgentCommand>[0]["providerSnapshotManager"],
+    createPaseoWorktree: async () => createdWorktree,
+    cleanupCreatedWorktreeForFailedCreate: cleanup,
+  };
+
+  try {
+    await expect(
+      createAgentCommand(dependencies, {
+        kind: "mcp",
+        provider: "codex",
+        cwd: workdir,
+        title: "rejected",
+        initialPrompt: "hello",
+        background: true,
+        notifyOnFinish: false,
+        worktree: { worktreeName: "feature", baseBranch: "main" },
+      }),
+    ).rejects.toThrow("missing label tenant");
+
+    expect(createAgent).toHaveBeenCalledTimes(1);
+    expect(cleanup).toHaveBeenCalledTimes(1);
+    expect(cleanup).toHaveBeenCalledWith(createdWorktree);
+  } finally {
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("cleanup failure is logged without replacing the original hook error", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "create-agent-cleanup-fail-"));
+  const createdWorktree = await fakeWorktreeCreator({
+    repoRoot: workdir,
+    createdWorkspaceId: "ws-cleanup-fail",
+  })();
+  const hookError = new ProviderLaunchHookError({
+    kind: "timeout",
+    message: "Provider launch hook timed out after 5000ms",
+  });
+  const dependencies: Parameters<typeof createAgentCommand>[0] = {
+    agentManager: {
+      createAgent: vi.fn(async () => {
+        throw hookError;
+      }),
+      getAgent: vi.fn(() => null),
+    } as unknown as Parameters<typeof createAgentCommand>[0]["agentManager"],
+    agentStorage: {} as Parameters<typeof createAgentCommand>[0]["agentStorage"],
+    logger: createTestLogger(),
+    providerSnapshotManager: {
+      resolveCreateConfig: vi.fn(async () => ({})),
+    } as Parameters<typeof createAgentCommand>[0]["providerSnapshotManager"],
+    createPaseoWorktree: async () => createdWorktree,
+    cleanupCreatedWorktreeForFailedCreate: vi.fn(async () => {
+      throw new Error("cleanup boom");
+    }),
+  };
+
+  try {
+    await expect(
+      createAgentCommand(dependencies, {
+        kind: "mcp",
+        provider: "codex",
+        cwd: workdir,
+        title: "rejected",
+        initialPrompt: "hello",
+        background: true,
+        notifyOnFinish: false,
+        worktree: { worktreeName: "feature", baseBranch: "main" },
+      }),
+    ).rejects.toBe(hookError);
+  } finally {
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("successful mcp create never cleans up its created worktree", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "create-agent-no-cleanup-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const agentManager = createRealAgentManager(storage);
+  const cleanup = vi.fn(async () => undefined);
+
+  try {
+    const { snapshot } = await createAgentCommand(
+      {
+        agentManager,
+        agentStorage: storage,
+        logger,
+        providerSnapshotManager: createProviderSnapshotManagerStub().manager,
+        createPaseoWorktree: fakeWorktreeCreator({
+          repoRoot: workdir,
+          createdWorkspaceId: "ws-success",
+        }),
+        cleanupCreatedWorktreeForFailedCreate: cleanup,
+      },
+      {
+        kind: "mcp",
+        provider: "codex",
+        cwd: workdir,
+        title: "success",
+        initialPrompt: "hello",
+        background: true,
+        notifyOnFinish: false,
+        worktree: { worktreeName: "feature", baseBranch: "main" },
+      },
+    );
+
+    expect(snapshot.workspaceId).toBe("ws-success");
+    expect(cleanup).not.toHaveBeenCalled();
+  } finally {
+    rmSync(workdir, { recursive: true, force: true });
   }
 });

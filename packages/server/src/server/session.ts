@@ -3365,7 +3365,16 @@ export class Session {
         : overrides;
       let snapshot: ManagedAgent;
       try {
-        snapshot = await this.agentManager.resumeAgentFromPersistence(handle, effectiveOverrides);
+        // Thread the stored record's durable labels and workspace through to the
+        // launch-hook context, matching every other launch site.
+        snapshot = await this.agentManager.resumeAgentFromPersistence(
+          handle,
+          effectiveOverrides,
+          undefined,
+          matched
+            ? { labels: matched.record.labels, workspaceId: matched.record.workspaceId }
+            : undefined,
+        );
       } catch (error) {
         if (matched?.didUnarchive && matched.originalArchivedAt) {
           await this.agentManager.archiveSnapshot(matched.record.id, matched.originalArchivedAt);
