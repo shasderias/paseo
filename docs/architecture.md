@@ -355,6 +355,12 @@ All providers:
 
 Providers that can accept native tool definitions should set `supportsNativePaseoTools` and read `launchContext.paseoTools`. The daemon then passes the shared Paseo tool catalog directly and removes the internal Paseo MCP server from that provider launch config. Providers that only support MCP continue to receive the same tools through the MCP fallback at `/mcp/agents`.
 
+Every managed provider process — hook or runtime — receives the non-overridable Paseo-owned launch variables `PASEO_AGENT_ID`, `PASEO_PROVIDER`, and `PASEO_AGENT_CWD` in its environment; they are applied last and cannot be overridden by provider config, hook output, or one-shot per-agent env.
+
+### Provider launch hook
+
+A configured per-provider `launchHook` (shell command in the provider override, see `docs/custom-providers.md`) runs once per managed agent session launch, immediately before `AgentManager` invokes the provider client's `createSession`/`resumeSession`/`importSession`. It runs from `$PASEO_HOME`, receives the agent's durable identity (agent id, provider, cwd, workspace id, labels, model, mode) via environment and a single stdin JSON object, and contributes provider environment that is applied after the provider's configured `env` and before one-shot per-agent env. Internal agents (Paseo's own utility processes) and catalog/diagnostic probing never invoke the hook. The hook fails closed: timeout (5s, full process-tree termination), output limits (16 KiB stdout, 64 KiB stderr, counted in raw bytes), invalid UTF-8 on either stream, non-zero exit, or malformed stdout all abort the launch before provider session creation and agent registration; a worktree created by the same request is cleaned up. See `packages/server/src/server/agent/launch-hook.ts`.
+
 ## Data flow: running an agent
 
 1. Client sends `CreateAgentRequestMessage` with config (prompt, cwd, provider, model, mode)

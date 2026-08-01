@@ -26,6 +26,7 @@ import {
   buildProviderRegistry,
   shutdownAgentClients,
   type ProviderDefinition,
+  type ProviderLaunchHookMetadata,
 } from "./provider-registry.js";
 import { BUILTIN_PROVIDER_IDS } from "@getpaseo/protocol/provider-manifest";
 import { applyMutableProviderConfigToOverrides } from "../daemon-config-store.js";
@@ -146,10 +147,18 @@ export interface ProviderDiagnosticResult {
   diagnostic: string;
 }
 
+/**
+ * Internal provider launch definition handed to AgentManager. Mirrors the
+ * resolved registry entry: enabled state plus optional resolved launch hook.
+ */
+export interface ProviderLaunchDefinition {
+  enabled: boolean;
+  derivedFromProviderId: string | null;
+  launchHook?: ProviderLaunchHookMetadata;
+}
+
 export interface AgentManagerProviderState {
-  providerDefinitions: Partial<
-    Record<AgentProvider, { enabled: boolean; derivedFromProviderId: string | null }>
-  >;
+  providerDefinitions: Partial<Record<AgentProvider, ProviderLaunchDefinition>>;
   clients: Partial<Record<AgentProvider, AgentClient>>;
 }
 
@@ -272,6 +281,7 @@ export class ProviderSnapshotManager {
       providerDefinitions[provider] = {
         enabled: definition.enabled,
         derivedFromProviderId: definition.derivedFromProviderId,
+        ...(definition.launchHook ? { launchHook: definition.launchHook } : {}),
       };
       if (definition.enabled) {
         clients[provider] = this.ensureClient(provider, definition);

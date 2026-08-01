@@ -49,6 +49,11 @@ export const ProviderOverrideSchema = z.object({
   description: z.string().optional(),
   command: z.array(z.string().min(1)).min(1).optional(),
   env: z.record(z.string(), z.string()).optional(),
+  /**
+   * Shell command run before each managed agent session launch of this
+   * provider. Output env is applied after the provider's configured env.
+   */
+  launchHook: z.string().min(1).optional(),
   params: z.record(z.string(), z.unknown()).optional(),
   models: z.array(ProviderProfileModelSchema).optional(),
   additionalModels: z.array(ProviderProfileModelSchema).optional(),

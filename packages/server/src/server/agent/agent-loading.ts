@@ -109,7 +109,13 @@ export async function ensureAgentLoaded(
         handle,
         buildConfigOverrides(record),
         agentId,
-        extractTimestamps(record),
+        {
+          ...extractTimestamps(record),
+          // Durable labels and workspace must reach the launch-hook context,
+          // matching the create path below and every other launch site.
+          labels: record.labels,
+          workspaceId: record.workspaceId,
+        },
         record.archivedAt ? { purpose: "history" } : undefined,
       );
       deps.logger.info({ agentId, provider: record.provider }, "Agent resumed from persistence");

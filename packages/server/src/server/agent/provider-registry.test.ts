@@ -1580,3 +1580,141 @@ describe("fetchCatalog", () => {
     expect(catalog.modes.map((mode) => mode.id)).toEqual(["ask"]);
   });
 });
+
+describe("launchHook resolution", () => {
+  test("built-in override exposes its hook and resolved provider env", () => {
+    const registry = buildProviderRegistry(logger, {
+      providerOverrides: {
+        claude: {
+          launchHook: "~/.paseo/hooks/claude-launch.sh",
+          env: { ANTHROPIC_API_KEY: "sk-test" },
+        },
+      },
+    });
+
+    expect(registry.claude.launchHook).toEqual({
+      command: "~/.paseo/hooks/claude-launch.sh",
+      providerEnv: { ANTHROPIC_API_KEY: "sk-test" },
+    });
+  });
+
+  test("providers without hooks expose no hook metadata", () => {
+    const registry = buildProviderRegistry(logger);
+
+    expect(registry.claude.launchHook).toBeUndefined();
+    expect(registry.codex.launchHook).toBeUndefined();
+    expect(registry.pi.launchHook).toBeUndefined();
+  });
+
+  test("derived provider inherits the base hook", () => {
+    const registry = buildProviderRegistry(logger, {
+      providerOverrides: {
+        claude: {
+          launchHook: "~/.paseo/hooks/claude-launch.sh",
+        },
+        zai: {
+          extends: "claude",
+          label: "ZAI",
+        },
+      },
+    });
+
+    expect(registry.zai.launchHook?.command).toBe("~/.paseo/hooks/claude-launch.sh");
+  });
+
+  test("derived provider overrides the inherited hook", () => {
+    const registry = buildProviderRegistry(logger, {
+      providerOverrides: {
+        claude: {
+          launchHook: "~/.paseo/hooks/claude-launch.sh",
+        },
+        zai: {
+          extends: "claude",
+          label: "ZAI",
+          launchHook: "~/.paseo/hooks/zai-launch.sh",
+        },
+      },
+    });
+
+    expect(registry.zai.launchHook?.command).toBe("~/.paseo/hooks/zai-launch.sh");
+    expect(registry.claude.launchHook?.command).toBe("~/.paseo/hooks/claude-launch.sh");
+  });
+
+  test("inherited hook sees the merged base/profile provider env", () => {
+    const registry = buildProviderRegistry(logger, {
+      providerOverrides: {
+        claude: {
+          launchHook: "~/.paseo/hooks/claude-launch.sh",
+          env: { BASE_VAR: "base", SHARED: "from-base" },
+        },
+        zai: {
+          extends: "claude",
+          label: "ZAI",
+          env: { PROFILE_VAR: "profile", SHARED: "from-profile" },
+        },
+      },
+    });
+
+    expect(registry.zai.launchHook).toEqual({
+      command: "~/.paseo/hooks/claude-launch.sh",
+      providerEnv: {
+        BASE_VAR: "base",
+        SHARED: "from-profile",
+        PROFILE_VAR: "profile",
+      },
+    });
+  });
+
+  test("base without a hook but profile with one resolves only the profile hook", () => {
+    const registry = buildProviderRegistry(logger, {
+      providerOverrides: {
+        claude: {
+          env: { BASE_VAR: "base" },
+        },
+        zai: {
+          extends: "claude",
+          label: "ZAI",
+          launchHook: "~/.paseo/hooks/zai-launch.sh",
+        },
+      },
+    });
+
+    expect(registry.zai.launchHook).toEqual({
+      command: "~/.paseo/hooks/zai-launch.sh",
+      providerEnv: { BASE_VAR: "base" },
+    });
+  });
+
+  test("ACP provider resolves its own hook and env", () => {
+    const registry = buildProviderRegistry(logger, {
+      providerOverrides: {
+        "my-agent": {
+          extends: "acp",
+          label: "My Agent",
+          command: ["my-agent", "--acp"],
+          launchHook: "~/.paseo/hooks/my-agent-launch.sh",
+          env: { MY_AGENT_VAR: "1" },
+        },
+      },
+    });
+
+    expect(registry["my-agent"].launchHook).toEqual({
+      command: "~/.paseo/hooks/my-agent-launch.sh",
+      providerEnv: { MY_AGENT_VAR: "1" },
+    });
+  });
+
+  test("ACP provider without a hook exposes no hook metadata", () => {
+    const registry = buildProviderRegistry(logger, {
+      providerOverrides: {
+        "my-agent": {
+          extends: "acp",
+          label: "My Agent",
+          command: ["my-agent", "--acp"],
+        },
+      },
+    });
+
+    expect(registry["my-agent"].launchHook).toBeUndefined();
+  });
+});

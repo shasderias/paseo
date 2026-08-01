@@ -214,6 +214,8 @@ Single file, validated with `PersistedConfigSchema`.
     // ProviderOverrideSchema; legacy entries with `command: { mode, ... }` are migrated to the
     // current shape on load via `migrateProviderSettings`. Custom provider IDs must declare
     // `extends` (one of the built-ins or `"acp"`) and `label`. See `provider-launch-config.ts`.
+    // Optional per-provider `launchHook` (shell command) runs before every managed agent
+    // session launch and contributes provider env; see `docs/custom-providers.md`.
     providers: Record<providerId, ProviderOverride>,
     metadataGeneration: {
       providers: [{ provider, model?, thinkingOptionId? }]

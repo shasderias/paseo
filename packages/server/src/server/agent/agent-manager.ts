@@ -73,6 +73,8 @@ import {
   type ProviderSubagentDescriptor,
   type ProviderSubagentStoreEvent,
 } from "./provider-subagents/store.js";
+import type { ProviderLaunchHookRunner } from "./launch-hook.js";
+import type { ProviderLaunchHookMetadata } from "./provider-registry.js";
 
 const RELOAD_SESSION_CLOSE_TIMEOUT_MS = 3_000;
 const INTERRUPT_SESSION_TIMEOUT_MS = 2_000;
@@ -220,11 +222,12 @@ interface AgentManagerRescueTimeouts {
   interruptSessionMs?: number;
 }
 
-interface ProviderEnabledFlag {
+interface ProviderLaunchFlag {
   enabled: boolean;
   derivedFromProviderId?: string | null;
+  launchHook?: ProviderLaunchHookMetadata;
 }
-type ProviderEnabledMap = Partial<Record<AgentProvider, ProviderEnabledFlag>>;
+type ProviderLaunchMap = Partial<Record<AgentProvider, ProviderLaunchFlag>>;
 type ProviderClientMap = Partial<Record<AgentProvider, AgentClient>>;
 
 export interface CreateAgentOptions {
@@ -240,7 +243,8 @@ export interface CreateAgentOptions {
 
 export interface AgentManagerOptions {
   clients?: ProviderClientMap;
-  providerDefinitions?: ProviderEnabledMap;
+  providerDefinitions?: ProviderLaunchMap;
+  launchHookRunner?: ProviderLaunchHookRunner;
   idFactory?: () => string;
   registry?: AgentStorage;
   onAgentAttention?: AgentAttentionCallback;
@@ -558,6 +562,7 @@ function getFirstUserMessageTextFromRows(rows: readonly AgentTimelineRow[]): str
 export class AgentManager {
   private readonly clients = new Map<AgentProvider, AgentClient>();
   private readonly providerEnabled = new Map<AgentProvider, boolean>();
+  private readonly providerLaunchHooks = new Map<AgentProvider, ProviderLaunchHookMetadata>();
   private readonly agents = new Map<string, LiveManagedAgent>();
   private readonly timelineStore = new InMemoryAgentTimelineStore();
   private readonly providerSubagents = new ProviderSubagentStore();
@@ -577,6 +582,7 @@ export class AgentManager {
   private readonly mcpAuthToken: string | null;
   private paseoToolsEnabled = true;
   private paseoToolCatalogFactory: PaseoToolCatalogFactory | null = null;
+  private readonly launchHookRunner: ProviderLaunchHookRunner | null;
   private appendSystemPrompt: string;
   private onAgentAttention?: AgentAttentionCallback;
   private onAgentArchived?: AgentArchivedCallback;
@@ -593,6 +599,7 @@ export class AgentManager {
     this.onWorkspaceStateMayHaveChanged = options?.onWorkspaceStateMayHaveChanged;
     this.mcpBaseUrl = options?.mcpBaseUrl ?? null;
     this.mcpAuthToken = options?.mcpAuthToken ?? null;
+    this.launchHookRunner = options.launchHookRunner ?? null;
     this.configurePaseoTools(options);
     this.appendSystemPrompt = options.appendSystemPrompt ?? "";
     this.logger = options.logger.child({ module: "agent", component: "agent-manager" });
@@ -626,13 +633,17 @@ export class AgentManager {
   }
 
   updateProviderRegistry(input: {
-    providerDefinitions: ProviderEnabledMap;
+    providerDefinitions: ProviderLaunchMap;
     clients: ProviderClientMap;
   }): void {
     this.providerEnabled.clear();
+    this.providerLaunchHooks.clear();
     for (const [provider, definition] of Object.entries(input.providerDefinitions)) {
       if (definition) {
         this.providerEnabled.set(provider, definition.enabled);
+        if (definition.launchHook) {
+          this.providerLaunchHooks.set(provider, definition.launchHook);
+        }
       }
     }
 
@@ -1023,12 +1034,17 @@ export class AgentManager {
     const client = await this.requireAvailableClient({
       provider: storedConfig.provider,
     });
-    const launchContext = await this.buildLaunchContext(
-      resolvedAgentId,
+    const launchContext = await this.buildLaunchContext({
+      agentId: resolvedAgentId,
       client,
-      storedConfig.cwd,
-      options?.env,
-    );
+      cwd: storedConfig.cwd,
+      provider: storedConfig.provider,
+      config: storedConfig,
+      labels: options.labels ?? {},
+      workspaceId: options.workspaceId ?? null,
+      internal: storedConfig.internal === true,
+      env: options?.env,
+    });
     const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
     const createOptions = this.buildCreateSessionOptions(options);
     const session = await client.createSession(providerLaunchConfig, launchContext, createOptions);
@@ -1106,7 +1122,16 @@ export class AgentManager {
         `Provider '${handle.provider}' is not available. Please ensure the CLI is installed.`,
       );
     }
-    const launchContext = await this.buildLaunchContext(resolvedAgentId, client, storedConfig.cwd);
+    const launchContext = await this.buildLaunchContext({
+      agentId: resolvedAgentId,
+      client,
+      cwd: storedConfig.cwd,
+      provider: handle.provider,
+      config: storedConfig,
+      labels: options?.labels ?? {},
+      workspaceId: options?.workspaceId ?? null,
+      internal: storedConfig.internal === true,
+    });
     const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
     const session = await client.resumeSession(
       handle,
@@ -1153,7 +1178,16 @@ export class AgentManager {
       },
       resolvedAgentId,
     );
-    const launchContext = await this.buildLaunchContext(resolvedAgentId, client, storedConfig.cwd);
+    const launchContext = await this.buildLaunchContext({
+      agentId: resolvedAgentId,
+      client,
+      cwd: storedConfig.cwd,
+      provider: input.provider,
+      config: storedConfig,
+      labels: input.labels ?? {},
+      workspaceId: input.workspaceId ?? null,
+      internal: storedConfig.internal === true,
+    });
     const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
     const imported = await client.importSession(
       {
@@ -1234,7 +1268,16 @@ export class AgentManager {
       provider,
     } as AgentSessionConfig;
     const { storedConfig, launchConfig } = await this.prepareSessionConfig(refreshConfig, agentId);
-    const launchContext = await this.buildLaunchContext(agentId, client, storedConfig.cwd);
+    const launchContext = await this.buildLaunchContext({
+      agentId,
+      client,
+      cwd: storedConfig.cwd,
+      provider,
+      config: storedConfig,
+      labels: existing.labels ?? {},
+      workspaceId: existing.workspaceId ?? null,
+      internal: storedConfig.internal === true,
+    });
     const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
 
     const session = handle
@@ -4176,17 +4219,36 @@ export class AgentManager {
       : next;
   }
 
-  private async buildLaunchContext(
-    agentId: string,
-    client: AgentClient,
-    cwd: string,
-    env?: Record<string, string>,
-  ): Promise<AgentLaunchContext> {
+  private async buildLaunchContext(input: {
+    agentId: string;
+    client: AgentClient;
+    cwd: string;
+    provider: AgentProvider;
+    /** Normalized session config — source of the effective model/mode values. */
+    config: AgentSessionConfig;
+    labels: Record<string, string>;
+    workspaceId: string | null;
+    internal: boolean;
+    /** One-shot per-agent env, applied after the hook (initial create only). */
+    env?: Record<string, string>;
+  }): Promise<AgentLaunchContext> {
+    const { agentId, client, cwd, provider, config, labels, workspaceId, internal, env } = input;
+    const hookEnv = await this.runLaunchHook({
+      agentId,
+      provider,
+      cwd,
+      config,
+      labels,
+      workspaceId,
+      internal,
+    });
     const context: AgentLaunchContext = {
       agentId,
       env: {
+        ...hookEnv,
         ...env,
         PASEO_AGENT_ID: agentId,
+        PASEO_PROVIDER: provider,
         PASEO_AGENT_CWD: cwd,
       },
     };
@@ -4198,6 +4260,39 @@ export class AgentManager {
       context.paseoTools = await this.paseoToolCatalogFactory({ callerAgentId: agentId });
     }
     return context;
+  }
+
+  /**
+   * Runs the resolved provider launch hook for a managed session launch. No
+   * hook configured, internal agents, and test managers without a runner all
+   * skip invocation. Typed hook failures propagate to the caller unchanged.
+   */
+  private async runLaunchHook(input: {
+    agentId: string;
+    provider: AgentProvider;
+    cwd: string;
+    config: AgentSessionConfig;
+    labels: Record<string, string>;
+    workspaceId: string | null;
+    internal: boolean;
+  }): Promise<Record<string, string>> {
+    const hook = this.providerLaunchHooks.get(input.provider);
+    if (!hook || input.internal || !this.launchHookRunner) {
+      return {};
+    }
+    return this.launchHookRunner({
+      command: hook.command,
+      providerEnv: hook.providerEnv,
+      context: {
+        agentId: input.agentId,
+        provider: input.provider,
+        cwd: input.cwd,
+        workspaceId: input.workspaceId,
+        labels: input.labels,
+        model: input.config.model ?? null,
+        modeId: input.config.modeId ?? null,
+      },
+    });
   }
 
   private resolveProviderLaunchConfig(

@@ -2500,7 +2500,9 @@ export class Session {
     });
   }
 
-  private async unarchiveAgentByHandle(handle: AgentPersistenceHandle): Promise<void> {
+  private async unarchiveAgentByHandle(
+    handle: AgentPersistenceHandle,
+  ): Promise<StoredAgentRecord | null> {
     const records = await this.agentStorage.list();
     const matched = records.find(
       (record) =>
@@ -2508,9 +2510,10 @@ export class Session {
         record.persistence?.sessionId === handle.sessionId,
     );
     if (!matched) {
-      return;
+      return null;
     }
     await unarchiveAgentState(this.agentStorage, this.agentManager, matched.id);
+    return matched;
   }
 
   private async handleUpdateAgentRequest(
@@ -3205,8 +3208,17 @@ export class Session {
       `Resuming agent ${handle.sessionId} (${handle.provider})`,
     );
     try {
-      await this.unarchiveAgentByHandle(handle);
-      const snapshot = await this.agentManager.resumeAgentFromPersistence(handle, overrides);
+      const matched = await this.unarchiveAgentByHandle(handle);
+      // Thread the stored record's durable labels and workspace through to the
+      // launch-hook context, matching every other launch site. Skipping this
+      // made the hook see `labels: {}` / `workspaceId: null` for an agent that
+      // has labels — a launch with an environment the agent never had.
+      const snapshot = await this.agentManager.resumeAgentFromPersistence(
+        handle,
+        overrides,
+        undefined,
+        matched ? { labels: matched.labels, workspaceId: matched.workspaceId } : undefined,
+      );
       await unarchiveAgentState(this.agentStorage, this.agentManager, snapshot.id);
       await this.agentManager.hydrateTimelineFromProvider(snapshot.id);
       await this.agentUpdates.forwardLiveAgent(snapshot);

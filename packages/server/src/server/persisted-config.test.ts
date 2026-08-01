@@ -398,6 +398,63 @@ describe("provider overrides (new format)", () => {
     expect(parsed.agents?.providers?.claude?.order).toBe(1);
   });
 
+  test("launchHook accepted for built-in, derived, and ACP providers", () => {
+    const parsed = PersistedConfigSchema.parse({
+      agents: {
+        providers: {
+          pi: {
+            launchHook: "~/.paseo/hooks/pi-launch.sh",
+          },
+          zai: {
+            extends: "claude",
+            label: "ZAI",
+            launchHook: "~/.paseo/hooks/zai-launch.sh",
+          },
+          "my-agent": {
+            extends: "acp",
+            label: "My Agent",
+            command: ["my-agent", "--acp"],
+            launchHook: "~/.paseo/hooks/my-agent-launch.sh",
+          },
+        },
+      },
+    });
+
+    expect(parsed.agents?.providers?.pi?.launchHook).toBe("~/.paseo/hooks/pi-launch.sh");
+    expect(parsed.agents?.providers?.zai?.launchHook).toBe("~/.paseo/hooks/zai-launch.sh");
+    expect(parsed.agents?.providers?.["my-agent"]?.launchHook).toBe(
+      "~/.paseo/hooks/my-agent-launch.sh",
+    );
+  });
+
+  test("empty launchHook → error", () => {
+    const result = PersistedConfigSchema.safeParse({
+      agents: {
+        providers: {
+          pi: {
+            launchHook: "",
+          },
+        },
+      },
+    });
+
+    expect(result.success).toBe(false);
+  });
+
+  test("non-string launchHook → error", () => {
+    const result = PersistedConfigSchema.safeParse({
+      agents: {
+        providers: {
+          pi: {
+            launchHook: 42,
+          },
+        },
+      },
+    });
+
+    expect(result.success).toBe(false);
+  });
+
   test("new provider without extends → error", () => {
     const result = PersistedConfigSchema.safeParse({
       agents: {

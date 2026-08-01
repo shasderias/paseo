@@ -5224,3 +5224,109 @@ describe("agent config setters", () => {
     });
   });
 });
+
+describe("resume agent RPC", () => {
+  test("threads the stored record's labels and workspaceId into the hook launch options", async () => {
+    const messages: SessionOutboundMessage[] = [];
+    const storedRecord = createStoredAgentRecord({
+      id: "agent-resume-1",
+      cwd: "/work",
+      workspaceId: "ws_abc",
+      labels: { tenant: "acme" },
+      persistence: { provider: "codex", sessionId: "sess-1" },
+    });
+    const resumedAgent = {
+      id: "agent-resume-1",
+      provider: "codex",
+      cwd: "/work",
+      workspaceId: "ws_abc",
+      config: { model: null, thinkingOptionId: null },
+      createdAt: new Date("2026-01-01T00:00:00.000Z"),
+      updatedAt: new Date("2026-01-01T00:00:00.000Z"),
+      lastUserMessageAt: null,
+      lifecycle: "idle",
+      capabilities: {},
+      currentModeId: null,
+      availableModes: [],
+      features: {},
+      pendingPermissions: [],
+      persistence: { provider: "codex", sessionId: "sess-1" },
+    } as never;
+    const resumeAgentFromPersistence = vi.fn().mockResolvedValue(resumedAgent);
+    const session = createSessionForTest({
+      messages,
+      agentManager: {
+        resumeAgentFromPersistence,
+        unarchiveSnapshot: vi.fn().mockResolvedValue(true),
+        notifyAgentState: vi.fn(),
+        hydrateTimelineFromProvider: vi.fn().mockResolvedValue(undefined),
+        getTimeline: vi.fn(() => []),
+      },
+      agentStorage: {
+        list: vi.fn().mockResolvedValue([storedRecord]),
+        get: vi.fn().mockResolvedValue(storedRecord),
+      },
+    });
+
+    await session.handleMessage({
+      type: "resume_agent_request",
+      requestId: "resume-1",
+      handle: { provider: "codex", sessionId: "sess-1" },
+    });
+
+    expect(resumeAgentFromPersistence).toHaveBeenCalledWith(
+      { provider: "codex", sessionId: "sess-1" },
+      undefined,
+      undefined,
+      { labels: { tenant: "acme" }, workspaceId: "ws_abc" },
+    );
+  });
+
+  test("resumes with empty labels when no stored record matches the handle", async () => {
+    const messages: SessionOutboundMessage[] = [];
+    const resumeAgentFromPersistence = vi.fn().mockResolvedValue({
+      id: "agent-resume-fresh",
+      provider: "codex",
+      cwd: "/work",
+      config: { model: null, thinkingOptionId: null },
+      createdAt: new Date("2026-01-01T00:00:00.000Z"),
+      updatedAt: new Date("2026-01-01T00:00:00.000Z"),
+      lastUserMessageAt: null,
+      lifecycle: "idle",
+      capabilities: {},
+      currentModeId: null,
+      availableModes: [],
+      features: {},
+      pendingPermissions: [],
+    } as never);
+    const session = createSessionForTest({
+      messages,
+      agentManager: {
+        resumeAgentFromPersistence,
+        unarchiveSnapshot: vi.fn().mockResolvedValue(true),
+        notifyAgentState: vi.fn(),
+        hydrateTimelineFromProvider: vi.fn().mockResolvedValue(undefined),
+        getTimeline: vi.fn(() => []),
+      },
+      agentStorage: {
+        list: vi.fn().mockResolvedValue([]),
+        get: vi.fn().mockResolvedValue(undefined),
+      },
+    });
+
+    await session.handleMessage({
+      type: "resume_agent_request",
+      requestId: "resume-2",
+      handle: { provider: "codex", sessionId: "sess-missing" },
+    });
+
+    // No record matched the handle, so the pre-existing empty-default behavior
+    // is preserved rather than inventing context from nothing.
+    expect(resumeAgentFromPersistence).toHaveBeenCalledWith(
+      { provider: "codex", sessionId: "sess-missing" },
+      undefined,
+      undefined,
+      undefined,
+    );
+  });
+});

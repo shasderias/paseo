@@ -652,19 +652,72 @@ When an `additionalModels` entry has the same `id` as a discovered model, it upd
 
 Every entry under `agents.providers` accepts these fields:
 
-| Field              | Type                      | Required          | Description                                                        |
-| ------------------ | ------------------------- | ----------------- | ------------------------------------------------------------------ |
-| `extends`          | `string`                  | Yes (custom only) | Built-in provider ID to inherit from, or `"acp"`                   |
-| `label`            | `string`                  | Yes (custom only) | Display name in the UI                                             |
-| `description`      | `string`                  | No                | Short description shown in the UI                                  |
-| `command`          | `string[]`                | Yes (ACP only)    | Command to spawn the agent process                                 |
-| `env`              | `Record<string, string>`  | No                | Environment variables to set for the agent process                 |
-| `params`           | `Record<string, unknown>` | No                | Provider-specific options such as `supportsMcpServers: false`      |
-| `models`           | `ProviderProfileModel[]`  | No                | Static model list (overrides runtime discovery)                    |
-| `additionalModels` | `ProviderProfileModel[]`  | No                | Static model additions (merged with runtime discovery or `models`) |
-| `disallowedTools`  | `string[]`                | No                | Tool names to disable for this provider (e.g. `["WebSearch"]`)     |
-| `enabled`          | `boolean`                 | No                | Set to `false` to hide the provider (default: `true`)              |
-| `order`            | `number`                  | No                | Sort order in the provider list                                    |
+| Field              | Type                      | Required          | Description                                                           |
+| ------------------ | ------------------------- | ----------------- | --------------------------------------------------------------------- |
+| `extends`          | `string`                  | Yes (custom only) | Built-in provider ID to inherit from, or `"acp"`                      |
+| `label`            | `string`                  | Yes (custom only) | Display name in the UI                                                |
+| `description`      | `string`                  | No                | Short description shown in the UI                                     |
+| `command`          | `string[]`                | Yes (ACP only)    | Command to spawn the agent process                                    |
+| `env`              | `Record<string, string>`  | No                | Environment variables to set for the agent process                    |
+| `params`           | `Record<string, unknown>` | No                | Provider-specific options such as `supportsMcpServers: false`         |
+| `models`           | `ProviderProfileModel[]`  | No                | Static model list (overrides runtime discovery)                       |
+| `additionalModels` | `ProviderProfileModel[]`  | No                | Static model additions (merged with runtime discovery or `models`)    |
+| `disallowedTools`  | `string[]`                | No                | Tool names to disable for this provider (e.g. `["WebSearch"]`)        |
+| `launchHook`       | `string`                  | No                | Shell command run before each managed agent session launch; see below |
+| `enabled`          | `boolean`                 | No                | Set to `false` to hide the provider (default: `true`)                 |
+| `order`            | `number`                  | No                | Sort order in the provider list                                       |
+
+### Provider launch hook
+
+A `launchHook` is a plain shell command that runs once per managed agent session launch, immediately before Paseo asks the provider client to create, resume, reload, or import that session. Its purpose is to decide, from facts about the agent being started, what extra environment variables the provider runtime gets. It is modelled on the worktree lifecycle scripts (`paseo.json` → `worktree.setup`): the same shell (`bash -c` on Unix), context supplied via environment variables, and one JSON payload on stdin.
+
+```json
+{
+  "agents": {
+    "providers": {
+      "pi": {
+        "launchHook": "~/.paseo/hooks/pi-launch.sh"
+      }
+    }
+  }
+}
+```
+
+**When it runs.** Every managed, non-internal agent session launch: new agent creation, provider-session import, explicit reload/replacement, persisted-agent resume after the runtime closed or the daemon restarted, and archived-history loads. It does **not** run for internal agents (Paseo's own short-lived utility processes), nor for provider catalog discovery, diagnostics, or draft command/feature inspection. There is no launch reason; all launch kinds use the same contract.
+
+**Context.** The hook runs with `$PASEO_HOME` as its working directory — the agent's working directory is supplied as `PASEO_AGENT_CWD` (and in the stdin payload) and must be opted into explicitly. Environment variables: `PASEO_AGENT_ID`, `PASEO_PROVIDER`, `PASEO_AGENT_CWD`. Stdin is a single JSON object:
+
+```json
+{
+  "agentId": "agent_01H...",
+  "provider": "pi",
+  "cwd": "/home/me/worktrees/feature-x",
+  "workspaceId": "ws_01H...",
+  "labels": { "tenant": "acme" },
+  "model": "...",
+  "modeId": "..."
+}
+```
+
+`workspaceId`, `model`, and `modeId` are `null` when unavailable; `labels` is an empty object when the agent has no labels. Labels are the intended way to thread caller-supplied parameters through to the hook — they are durable inputs, set on every creation path, and available on every later launch.
+
+**Output.** The hook prints JSON to stdout: `{"env": {"SOME_VAR": "value"}}`. Whitespace-only stdout means the hook contributed nothing. Unknown top-level keys are ignored. Stderr is for tracing and is captured into the daemon log — it is never treated as output.
+
+**Environment precedence.** Later entries win:
+
+1. The daemon's own environment
+2. The provider's configured `env` block
+3. The hook's `env`
+4. Per-agent `env` supplied to `create_agent` (only reachable from `paseo agent run --env` and hub execution requests)
+5. Paseo's own launch variables (`PASEO_AGENT_ID`, `PASEO_PROVIDER`, `PASEO_AGENT_CWD`) — not overridable
+
+One-shot per-agent `env` is **not** exposed to the hook: it is the explicit override layer applied after the hook returns.
+
+**Inheritance.** A custom provider that extends a built-in inherits the base's hook unless it declares its own, matching how `env` and `params` inherit. An inherited hook's output still outranks the profile's own `env` block (see precedence above).
+
+**Failure and timeout.** The hook fails closed — any failure aborts the launch instead of starting the agent with an environment the hook did not approve. Non-zero exit aborts with the hook's stdout returned verbatim in the error so the hook can explain what was wrong. Timeout is 5 seconds, after which the whole hook process tree is terminated. Stdout and stderr are bounded independently — 16 KiB and 64 KiB respectively — counted in raw bytes, and a stream that exceeds its limit terminates the tree and fails the launch with an explicit output-limit error. Both streams must be valid UTF-8: decoding is strict and happens before exit-code or JSON interpretation, so a hook emitting malformed bytes fails as invalid UTF-8 rather than having corrupted bytes parsed as output. Zero exit with stdout that is not valid result JSON fails the same way. A hook failure occurs before provider session creation and agent registration: no agent is registered, and a worktree created by the same request is cleaned up. Retrying is a fresh create.
+
+**Config changes.** Changes loaded by the daemon apply to subsequent launches; agents already running are untouched. Manual edits to `config.json` require the daemon to reload or restart, matching provider `env` and `command` behavior. Provider catalog and model discovery do not run the hook, so they cannot depend on per-agent dynamic credentials.
 
 ### Model definition
 

@@ -766,6 +766,49 @@ describe("ProviderSnapshotManager public surface", () => {
     }
   });
 
+  test("applyMutableProviderConfig preserves launchHook across unrelated settings changes", () => {
+    const manager = new ProviderSnapshotManager({
+      logger: createTestLogger(),
+      providerOverrides: {
+        pi: {
+          launchHook: "~/.paseo/hooks/pi-launch.sh",
+          env: { PI_VAR: "1" },
+        },
+      },
+    });
+    try {
+      manager.applyMutableProviderConfig({ pi: { enabled: false } });
+      const state = manager.getAgentManagerProviderState();
+      expect(state.providerDefinitions.pi).toMatchObject({ enabled: false });
+      expect(state.providerDefinitions.pi?.launchHook).toEqual({
+        command: "~/.paseo/hooks/pi-launch.sh",
+        providerEnv: { PI_VAR: "1" },
+      });
+    } finally {
+      manager.destroy();
+    }
+  });
+
+  test("removing a provider drops its launch hook", () => {
+    const manager = new ProviderSnapshotManager({
+      logger: createTestLogger(),
+      providerOverrides: {
+        "zai-claude": {
+          extends: "claude",
+          label: "ZAI",
+          launchHook: "~/.paseo/hooks/zai-launch.sh",
+        },
+      },
+    });
+    try {
+      manager.applyMutableProviderConfig({}, { removeProviders: ["zai-claude"] });
+      const state = manager.getAgentManagerProviderState();
+      expect(state.providerDefinitions["zai-claude"]).toBeUndefined();
+    } finally {
+      manager.destroy();
+    }
+  });
+
   test("resolveCreateConfig reduces a managed parent to provider mode and unattended data", async () => {
     const resolverInputs: ResolveAgentCreateConfigInput[] = [];
     const childModes: AgentMode[] = [

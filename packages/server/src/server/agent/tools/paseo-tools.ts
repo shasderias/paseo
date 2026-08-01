@@ -35,7 +35,10 @@ import type { FirstAgentContext } from "../../messages.js";
 import { everyMsToFiveFieldCron } from "@getpaseo/protocol/schedule/cadence";
 import { expandUserPath, isSameOrDescendantPath, resolvePathFromBase } from "../../path-utils.js";
 import type { TerminalManager } from "../../../terminal/terminal-manager.js";
-import type { CreatePaseoWorktreeWorkflowFn } from "../../worktree-session.js";
+import type {
+  CreatePaseoWorktreeWorkflowFn,
+  CreatePaseoWorktreeWorkflowResult,
+} from "../../worktree-session.js";
 import type { ScheduleService } from "../../schedule/service.js";
 import {
   ScheduleRunSchema,
@@ -123,6 +126,10 @@ export interface PaseoToolHostDependencies {
     cwd: string,
     firstAgentContext?: FirstAgentContext,
   ) => Promise<string>;
+  // Cleans up a worktree created by a failed create_agent request.
+  cleanupCreatedWorktreeForFailedCreate?: (
+    createdWorktree: CreatePaseoWorktreeWorkflowResult,
+  ) => Promise<void>;
   browserToolsEnabled?: boolean;
   browserToolsBroker?: BrowserToolsBroker | null;
   paseoHome?: string;
@@ -1438,6 +1445,12 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
           createPaseoWorktree: options.createPaseoWorktree,
           ...(options.ensureWorkspaceForCreate
             ? { ensureWorkspaceForCreate: options.ensureWorkspaceForCreate }
+            : {}),
+          ...(options.cleanupCreatedWorktreeForFailedCreate
+            ? {
+                cleanupCreatedWorktreeForFailedCreate:
+                  options.cleanupCreatedWorktreeForFailedCreate,
+              }
             : {}),
         },
         {

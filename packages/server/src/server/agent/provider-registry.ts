@@ -58,6 +58,17 @@ export type { AgentProviderDefinition };
 
 export { AGENT_PROVIDER_DEFINITIONS, getAgentProviderDefinition };
 
+/**
+ * Resolved per-provider launch hook: the shell command to run before a
+ * managed agent session launch, plus the fully resolved provider env the
+ * hook inherits as its baseline. Distinct from the public provider catalog
+ * and from provider command-line configuration.
+ */
+export interface ProviderLaunchHookMetadata {
+  command: string;
+  providerEnv: Record<string, string>;
+}
+
 export interface ProviderDefinition extends AgentProviderDefinition {
   enabled: boolean;
   /**
@@ -66,6 +77,8 @@ export interface ProviderDefinition extends AgentProviderDefinition {
    * generic ACP providers (which only extend the literal "acp" sentinel).
    */
   derivedFromProviderId: string | null;
+  /** Resolved launch hook for this provider, when configured. */
+  launchHook?: ProviderLaunchHookMetadata;
   createClient: (logger: Logger) => AgentClient;
   resolveCreateConfig: (input: ResolveAgentCreateConfigInput) => ResolveAgentCreateConfigResult;
   isCreateConfigUnattended: (input: AgentCreateConfigUnattendedInput) => boolean;
@@ -111,6 +124,7 @@ interface ResolvedProvider {
   profileModelsAreAdditive: boolean;
   enabled: boolean;
   derivedFromProviderId: string | null;
+  launchHook?: ProviderLaunchHookMetadata;
   providerParams?: unknown;
   createBaseClient: (logger: Logger) => AgentClient;
 }
@@ -513,6 +527,7 @@ function createRegistryEntry(
     ...resolved.definition,
     enabled: resolved.enabled,
     derivedFromProviderId: resolved.derivedFromProviderId,
+    ...(resolved.launchHook ? { launchHook: resolved.launchHook } : {}),
     createClient: (providerLogger: Logger) =>
       createResolvedProviderClient(providerLogger, provider, resolved),
     resolveCreateConfig: modelClient.resolveCreateConfig ?? resolveDefaultAgentCreateConfig,
@@ -580,6 +595,26 @@ function createResolvedProviderClient(
   );
 }
 
+/**
+ * A profile extending a built-in inherits the base's hook unless it declares
+ * its own. Either way the hook's env baseline is the fully merged base/profile
+ * provider env, so hook output is applied after the complete configured env.
+ */
+function resolveDerivedLaunchHook(
+  baseProvider: ResolvedProvider,
+  override: ProviderOverride,
+  mergedRuntimeSettings: ProviderRuntimeSettings | undefined,
+): ProviderLaunchHookMetadata | undefined {
+  const command = override.launchHook ?? baseProvider.launchHook?.command;
+  if (!command) {
+    return undefined;
+  }
+  return {
+    command,
+    providerEnv: mergedRuntimeSettings?.env ?? {},
+  };
+}
+
 function buildResolvedBuiltinProviders(
   providerOverrides: Record<string, ProviderOverride>,
   runtimeSettings: AgentProviderRuntimeSettingsMap | undefined,
@@ -611,6 +646,12 @@ function buildResolvedBuiltinProviders(
       profileModelsAreAdditive: false,
       enabled: override?.enabled ?? definition.enabledByDefault ?? true,
       derivedFromProviderId: null,
+      launchHook: override?.launchHook
+        ? {
+            command: override.launchHook,
+            providerEnv: mergedRuntimeSettings?.env ?? {},
+          }
+        : undefined,
       providerParams: override?.params,
       createBaseClient: (logger) =>
         factory(logger, mergedRuntimeSettings, {
@@ -664,6 +705,12 @@ function addDerivedProviders(
         profileModelsAreAdditive: false,
         enabled: override.enabled !== false,
         derivedFromProviderId: null,
+        launchHook: override.launchHook
+          ? {
+              command: override.launchHook,
+              providerEnv: override.env ?? {},
+            }
+          : undefined,
         providerParams: override.params,
         createBaseClient: (logger) => {
           const acpOptions = {
@@ -713,6 +760,7 @@ function addDerivedProviders(
       profileModelsAreAdditive: false,
       enabled: override.enabled !== false,
       derivedFromProviderId: baseProviderId,
+      launchHook: resolveDerivedLaunchHook(baseProvider, override, mergedRuntimeSettings),
       providerParams,
       createBaseClient: (logger) =>
         baseFactory(logger, mergedRuntimeSettings, {
